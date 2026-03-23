@@ -1,6 +1,8 @@
-/* Configuration: Load 
-   environment and 
-   security modules */
+/**
+ * Configuration: Load 
+ * environment and 
+ * security modules 
+ */
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -10,8 +12,7 @@ const path = require('path');
 
 const app = express();
 const portNumber = process.env.PORT || 3000;
-const cachePath = 
-  path.join(__dirname, 'marketCache.json');
+const cachePath = path.join(__dirname, 'marketCache.json');
 
 /* Constants: 2026 
    Baselines and 
@@ -21,10 +22,14 @@ const baseGasCAD = 1.28;
 const usdToCadRate = 1.38; 
 const yuanDiscountFactor = 0.85;
 
-/* Middleware: Enable 
-   CORS and protect 
-   from rate abuse */
+/**
+ * Production Security:
+ * Trust Render proxy and 
+ * enable CORS/Limiting
+ */
+app.set('trust proxy', 1);
 app.use(cors());
+app.use(express.json());
 
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -35,29 +40,44 @@ const apiLimiter = rateLimit({
 
 app.use('/api/', apiLimiter);
 
-/* Logic: Fetch Brent 
-   Crude and calculate 
-   geopolitical metrics */
+/**
+ * Logic: Fetch Brent 
+ * with a fail-safe fallback 
+ * to prevent 500 errors
+ */
 async function refreshMarketData() {
   const apiKey = process.env.OIL_API_KEY;
   const apiUrl = 
-    `https://www.alphavantage.co/` +
-    `query?function=BRENT` +
-    `&apikey=${apiKey}`;
+    `https://www.alphavantage.co/query?` +
+    `function=BRENT&apikey=${apiKey}`;
 
-  const response = await fetch(apiUrl);
-  const data = await response.json();
+  let priceUSD;
 
-  if (!data.data || !data.data[0]) {
-    throw new Error('Market API Timeout');
+  try {
+    const response = await fetch(apiUrl);
+    const data = await response.json();
+
+    /* Validation: Check if 
+       API returned data or 
+       a 'Note' (rate limit) */
+    if (data && data.data && data.data[0]) {
+      priceUSD = parseFloat(data.data[0].value);
+      console.log("Market Data Fetched Successfully");
+    } else {
+      /* Fallback: Use 2026 
+         projected baseline 
+         if API is throttled */
+      console.warn("API Limit/Error: Using Fallback Data");
+      priceUSD = 78.50; 
+    }
+  } catch (apiError) {
+    console.error("Network Error: Using Fallback");
+    priceUSD = 78.50;
   }
-
-  const priceUSD = 
-    parseFloat(data.data[0].value);
   
-  /* Calculations: Convert 
-     to CAD and apply 
-     Yuan trade discount */
+  /* Calculations: Consistent 
+     logic regardless of 
+     the data source */
   const priceCAD = priceUSD * usdToCadRate;
   const priceYuanRouteCAD = 
     (priceUSD * yuanDiscountFactor) * usdToCadRate;
@@ -81,6 +101,9 @@ async function refreshMarketData() {
     lastUpdated: Date.now()
   };
 
+  /* Cache: Save to disk 
+     to reduce future 
+     API dependencies */
   await fs.writeFile(
     cachePath, 
     JSON.stringify(freshData)
@@ -89,17 +112,17 @@ async function refreshMarketData() {
   return freshData;
 }
 
-/* Route: Serve data 
-   from JSON cache 
-   to prevent lag */
-app.get('/api/impactData', 
-  async (req, res) => {
+/**
+ * Route: Serve data 
+ * from JSON cache 
+ * to prevent lag 
+ */
+app.get('/api/impactData', async (req, res) => {
   try {
     let marketData;
     
     try {
-      const cachedRaw = 
-        await fs.readFile(cachePath, 'utf8');
+      const cachedRaw = await fs.readFile(cachePath, 'utf8');
       marketData = JSON.parse(cachedRaw);
       
       const oneDay = 24 * 60 * 60 * 1000;
@@ -115,32 +138,22 @@ app.get('/api/impactData',
     res.json(marketData);
 
   } catch (error) {
-    console.error("System Error:", error.message);
+    console.error("Critical System Error:", error.message);
     res.status(500).json({ 
       status: "error", 
-      message: "Data logic failure" 
+      message: "Logic failure" 
     });
   }
 });
 
-/* Routing: Serve the UI 
-   assets securely from 
-   the public folder */
+/* Static Assets & Fallback */
 app.use(express.static('public'));
 
-/* Fallback: Redirect all 
-   other requests back 
-   to the dashboard */
 app.get('*', (req, res) => {
-  res.sendFile(
-    path.join(__dirname, 'public', 'index.html')
-  );
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-/* Listener: Start 
-   the Express engine */
+/* Listener */
 app.listen(portNumber, () => {
-  console.log(
-    `Engine Live: http://localhost:${portNumber}`
-  );
+  console.log(`Engine Live: http://localhost:${portNumber}`);
 });
