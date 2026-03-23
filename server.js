@@ -123,6 +123,20 @@ app.get('/api/impactData',
   }
 });
 
+/* Routing: Serve the UI 
+   assets securely from 
+   the public folder */
+app.use(express.static('public'));
+
+/* Fallback: Redirect all 
+   other requests back 
+   to the dashboard */
+app.get('*', (req, res) => {
+  res.sendFile(
+    path.join(__dirname, 'public', 'index.html')
+  );
+});
+
 /* Listener: Start 
    the Express engine */
 app.listen(portNumber, () => {
