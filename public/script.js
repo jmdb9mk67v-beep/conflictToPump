@@ -28,7 +28,7 @@ const ui = {
 async function fetchMarketImpact() {
   try {
     const response =
-      await fetch('http://localhost:3000/api/impactData');
+      await fetch('/api/impactData');
     const result =
       await response.json();
 
