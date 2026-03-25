@@ -1,8 +1,4 @@
-![Visitors](https://komarev.com/ghpvc/?username=jmdb9mk67v-beep&repo=conflictToPump&color=0a0a0a&style=flat-square&label=VISITORS)
-
 # 🛢️ Conflict-to-Pump: Energy Dashboard
-
-**Live Demo:** [conflicttopump.onrender.com](https://conflicttopump.onrender.com)
 
 A full-stack web application that tracks global oil 
 prices and estimates the cost of gas per liter 

@@ -1,8 +1,3 @@
-/**
- * Configuration: Load 
- * environment and 
- * security modules 
- */
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -14,19 +9,11 @@ const app = express();
 const portNumber = process.env.PORT || 3000;
 const cachePath = path.join(__dirname, 'marketCache.json');
 
-/* Constants: 2026 
-   Baselines and 
-   Exchange Projections */
-const baseOilUSD = 65.00;
-const baseGasCAD = 1.28;
-const usdToCadRate = 1.38; 
+const baseOilUsd = 65.00;
+const baseGasCad = 1.28;
+const usdToCadRate = 1.38;
 const yuanDiscountFactor = 0.85;
 
-/**
- * Production Security:
- * Trust Render proxy and 
- * enable CORS/Limiting
- */
 app.set('trust proxy', 1);
 app.use(cors());
 app.use(express.json());
@@ -40,91 +27,93 @@ const apiLimiter = rateLimit({
 
 app.use('/api/', apiLimiter);
 
-/**
- * Logic: Fetch Brent 
- * with a fail-safe fallback 
- * to prevent 500 errors
- */
+/* Network: Wrap the native fetch
+   in an AbortController to enforce
+   a strict timeout, preventing the
+   Node thread from hanging forever. */
+async function fetchWithTimeout(url, options = {}) {
+  const { timeout = 5000 } = options;
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
+  const response = await fetch(url, {
+    ...options,
+    signal: controller.signal
+  });
+  clearTimeout(id);
+  return response;
+}
+
+/* Logic: Isolate the API call
+   with the timeout wrapper to
+   ensure a fallback response is
+   always served without delay. */
 async function refreshMarketData() {
   const apiKey = process.env.OIL_API_KEY;
-  const apiUrl = 
+  const apiUrl =
     `https://www.alphavantage.co/query?` +
     `function=BRENT&apikey=${apiKey}`;
 
-  let priceUSD;
+  let priceUsd;
 
   try {
-    const response = await fetch(apiUrl);
+    const response = await fetchWithTimeout(apiUrl);
     const data = await response.json();
 
-    /* Validation: Check if 
-       API returned data or 
-       a 'Note' (rate limit) */
     if (data && data.data && data.data[0]) {
-      priceUSD = parseFloat(data.data[0].value);
+      priceUsd = parseFloat(data.data[0].value);
       console.log("Market Data Fetched Successfully");
     } else {
-      /* Fallback: Use 2026 
-         projected baseline 
-         if API is throttled */
-      console.warn("API Limit/Error: Using Fallback Data");
-      priceUSD = 78.50; 
+      console.warn("API Limit: Using Fallback Data");
+      priceUsd = 78.50;
     }
   } catch (apiError) {
     console.error("Network Error: Using Fallback");
-    priceUSD = 78.50;
+    priceUsd = 78.50;
   }
-  
-  /* Calculations: Consistent 
-     logic regardless of 
-     the data source */
-  const priceCAD = priceUSD * usdToCadRate;
-  const priceYuanRouteCAD = 
-    (priceUSD * yuanDiscountFactor) * usdToCadRate;
-  
-  const warPremiumCAD = 
-    Math.max(0, priceCAD - (baseOilUSD * usdToCadRate));
-  
-  const percentIncrease = 
-    warPremiumCAD / (baseOilUSD * usdToCadRate);
-  
-  const estimatedGasShock = 
-    baseGasCAD * (1 + percentIncrease);
+
+  const priceCad = priceUsd * usdToCadRate;
+  const priceYuanRouteCad =
+    (priceUsd * yuanDiscountFactor) * usdToCadRate;
+
+  const warPremiumCad =
+    Math.max(0, priceCad - (baseOilUsd * usdToCadRate));
+
+  const percentIncrease =
+    warPremiumCad / (baseOilUsd * usdToCadRate);
+
+  const estimatedGasShock =
+    baseGasCad * (1 + percentIncrease);
 
   const freshData = {
     status: "success",
-    oilPriceCAD: priceCAD.toFixed(2),
-    yuanPriceCAD: priceYuanRouteCAD.toFixed(2),
-    priceSpreadCAD: 
-      (priceCAD - priceYuanRouteCAD).toFixed(2),
-    gasShockCAD: estimatedGasShock.toFixed(2),
+    oilPriceCad: priceCad.toFixed(2),
+    yuanPriceCad: priceYuanRouteCad.toFixed(2),
+    priceSpreadCad:
+      (priceCad - priceYuanRouteCad).toFixed(2),
+    gasShockCad: estimatedGasShock.toFixed(2),
     lastUpdated: Date.now()
   };
 
-  /* Cache: Save to disk 
-     to reduce future 
-     API dependencies */
   await fs.writeFile(
-    cachePath, 
+    cachePath,
     JSON.stringify(freshData)
   );
-  
+
   return freshData;
 }
 
-/**
- * Route: Serve data 
- * from JSON cache 
- * to prevent lag 
- */
+/* Route: Nested try-catch blocks
+   ensure cache initialization on
+   the very first run, preventing
+   read errors on a cold boot. */
 app.get('/api/impactData', async (req, res) => {
   try {
     let marketData;
-    
+
     try {
       const cachedRaw = await fs.readFile(cachePath, 'utf8');
       marketData = JSON.parse(cachedRaw);
-      
+
       const oneDay = 24 * 60 * 60 * 1000;
       if ((Date.now() - marketData.lastUpdated) > oneDay) {
         console.log("Refreshing Cache...");
@@ -139,21 +128,19 @@ app.get('/api/impactData', async (req, res) => {
 
   } catch (error) {
     console.error("Critical System Error:", error.message);
-    res.status(500).json({ 
-      status: "error", 
-      message: "Logic failure" 
+    res.status(500).json({
+      status: "error",
+      message: "Logic failure"
     });
   }
 });
 
-/* Static Assets & Fallback */
 app.use(express.static('public'));
 
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-/* Listener */
 app.listen(portNumber, () => {
   console.log(`Engine Live: http://localhost:${portNumber}`);
 });
