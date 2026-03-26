@@ -1,3 +1,5 @@
+[![HitCount](https://hits.dwyl.com/jmdb9mk67v-beep/conflictToPump.svg?style=flat-square)](https://hits.dwyl.com/jmdb9mk67v-beep/conflictToPump)
+
 # 🛢️ Conflict-to-Pump: Energy Dashboard
 
 A full-stack web application that tracks global oil 
