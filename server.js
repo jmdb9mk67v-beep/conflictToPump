@@ -61,6 +61,7 @@ async function refreshMarketData() {
   let priceUsd;
   const response = await fetchWithTimeout(apiUrl);
   const data = await response.json();
+  console.log("Raw Payload:", JSON.stringify(data));
 
   if (data && data.data && data.data[0]) {
     priceUsd = parseFloat(data.data[0].value);
