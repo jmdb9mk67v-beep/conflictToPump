@@ -18,6 +18,9 @@ app.set('trust proxy', 1);
 app.use(cors());
 app.use(express.json());
 
+/* Middleware: Limits incoming requests
+   to protect the backend from spam
+   and DDoS attacks. */
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 50,
@@ -35,40 +38,35 @@ async function fetchWithTimeout(url, options = {}) {
   const { timeout = 5000 } = options;
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
+  
   const response = await fetch(url, {
     ...options,
     signal: controller.signal
   });
+  
   clearTimeout(id);
   return response;
 }
 
-/* Logic: Isolate the API call
-   with the timeout wrapper to
-   ensure a fallback response is
-   always served without delay. */
+/* Logic: Fetches external API data.
+   Throws an error if the payload
+   is invalid to prevent overwriting
+   the cache with corrupted data. */
 async function refreshMarketData() {
   const apiKey = process.env.OIL_API_KEY;
   const apiUrl =
     `https://www.alphavantage.co/query?` +
-    `function=BRENT&apikey=${apiKey}`;
+    `function=BRENT&interval=daily&apikey=${apiKey}`;
 
   let priceUsd;
+  const response = await fetchWithTimeout(apiUrl);
+  const data = await response.json();
 
-  try {
-    const response = await fetchWithTimeout(apiUrl);
-    const data = await response.json();
-
-    if (data && data.data && data.data[0]) {
-      priceUsd = parseFloat(data.data[0].value);
-      console.log("Market Data Fetched Successfully");
-    } else {
-      console.warn("API Limit: Using Fallback Data");
-      priceUsd = 78.50;
-    }
-  } catch (apiError) {
-    console.error("Network Error: Using Fallback");
-    priceUsd = 78.50;
+  if (data && data.data && data.data[0]) {
+    priceUsd = parseFloat(data.data[0].value);
+    console.log("Market Data Fetched Successfully");
+  } else {
+    throw new Error("API Limit or Invalid Payload");
   }
 
   const priceCad = priceUsd * usdToCadRate;
@@ -102,26 +100,42 @@ async function refreshMarketData() {
   return freshData;
 }
 
-/* Route: Nested try-catch blocks
-   ensure cache initialization on
-   the very first run, preventing
-   read errors on a cold boot. */
+/* Route: Checks cache validity against
+   a 2-hour TTL to respect API limits.
+   Serves stale cache as a fallback if
+   the external API request fails. */
 app.get('/api/impactData', async (req, res) => {
   try {
     let marketData;
+    let isCacheValid = false;
+    const cacheTtl = 2 * 60 * 60 * 1000;
 
     try {
       const cachedRaw = await fs.readFile(cachePath, 'utf8');
       marketData = JSON.parse(cachedRaw);
-
-      const oneDay = 24 * 60 * 60 * 1000;
-      if ((Date.now() - marketData.lastUpdated) > oneDay) {
-        console.log("Refreshing Cache...");
-        marketData = await refreshMarketData();
+      
+      if ((Date.now() - marketData.lastUpdated) <= cacheTtl) {
+        isCacheValid = true;
       }
     } catch (err) {
-      console.log("Initializing Cache...");
-      marketData = await refreshMarketData();
+      console.log("No cache found on disk.");
+    }
+
+    if (!isCacheValid) {
+      try {
+        console.log("Refreshing market data...");
+        marketData = await refreshMarketData();
+      } catch (fetchError) {
+        console.error("Fetch failed:", fetchError.message);
+        
+        if (!marketData) {
+          return res.status(503).json({
+            status: "error",
+            message: "Service Unavailable"
+          });
+        }
+        console.log("Serving stale cache as fallback.");
+      }
     }
 
     res.json(marketData);
