@@ -9,6 +9,9 @@ const app = express();
 const portNumber = process.env.PORT || 3000;
 const cachePath = path.join(__dirname, 'marketCache.json');
 
+/* Economics: These baseline constants 
+   drive the 'Shock' calculations 
+   on the frontend. */
 const baseOilUsd = 65.00;
 const baseGasCad = 1.28;
 const usdToCadRate = 1.38;
@@ -18,9 +21,9 @@ app.set('trust proxy', 1);
 app.use(cors());
 app.use(express.json());
 
-/* Middleware: Limits incoming requests
-   to protect the backend from spam
-   and DDoS attacks. */
+/* Security: Limits requests to prevent 
+   your backend from being bogged 
+   down by spam. */
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 50,
@@ -30,10 +33,9 @@ const apiLimiter = rateLimit({
 
 app.use('/api/', apiLimiter);
 
-/* Network: Wrap the native fetch
-   in an AbortController to enforce
-   a strict timeout, preventing the
-   Node thread from hanging forever. */
+/* Network: Enforces a timeout so 
+   a hanging API request doesn't 
+   stall your entire server. */
 async function fetchWithTimeout(url, options = {}) {
   const { timeout = 5000 } = options;
   const controller = new AbortController();
@@ -48,63 +50,64 @@ async function fetchWithTimeout(url, options = {}) {
   return response;
 }
 
-/* Logic: Fetches external API data.
-   Throws an error if the payload
-   is invalid to prevent overwriting
-   the cache with corrupted data. */
+/* Logic: Connects to OilPriceAPI. 
+   Includes a clean success log 
+   without leaking your secret key. */
 async function refreshMarketData() {
   const apiKey = process.env.OIL_API_KEY;
-  const apiUrl =
-    `https://www.alphavantage.co/query?` +
-    `function=BRENT&interval=daily&apikey=${apiKey}`;
+  const apiUrl = 
+    'https://api.oilpriceapi.com/v1/prices/latest';
 
-  let priceUsd;
-  const response = await fetchWithTimeout(apiUrl);
+  const response = await fetchWithTimeout(apiUrl, {
+    headers: {
+      'Authorization': `Token ${apiKey}`,
+      'Content-Type': 'application/json'
+    }
+  });
+
   const data = await response.json();
-  console.log("Raw Payload:", JSON.stringify(data));
 
-  if (data && data.data && data.data[0]) {
-    priceUsd = parseFloat(data.data[0].value);
-    console.log("Market Data Fetched Successfully");
+  if (data && data.data && data.data.price) {
+    const priceUsd = parseFloat(data.data.price);
+    console.log(`Success: Crude is $${priceUsd} USD`);
+    
+    const priceCad = priceUsd * usdToCadRate;
+    const priceYuanRouteCad = 
+      (priceUsd * yuanDiscountFactor) * usdToCadRate;
+
+    const warPremiumCad = 
+      Math.max(0, priceCad - (baseOilUsd * usdToCadRate));
+
+    const percentIncrease = 
+      warPremiumCad / (baseOilUsd * usdToCadRate);
+
+    const estimatedGasShock = 
+      baseGasCad * (1 + percentIncrease);
+
+    const freshData = {
+      status: "success",
+      oilPriceCad: priceCad.toFixed(2),
+      yuanPriceCad: priceYuanRouteCad.toFixed(2),
+      priceSpreadCad: 
+        (priceCad - priceYuanRouteCad).toFixed(2),
+      gasShockCad: estimatedGasShock.toFixed(2),
+      lastUpdated: Date.now()
+    };
+
+    await fs.writeFile(
+      cachePath, 
+      JSON.stringify(freshData)
+    );
+
+    return freshData;
   } else {
-    throw new Error("API Limit or Invalid Payload");
+    throw new Error("Invalid API response");
   }
-
-  const priceCad = priceUsd * usdToCadRate;
-  const priceYuanRouteCad =
-    (priceUsd * yuanDiscountFactor) * usdToCadRate;
-
-  const warPremiumCad =
-    Math.max(0, priceCad - (baseOilUsd * usdToCadRate));
-
-  const percentIncrease =
-    warPremiumCad / (baseOilUsd * usdToCadRate);
-
-  const estimatedGasShock =
-    baseGasCad * (1 + percentIncrease);
-
-  const freshData = {
-    status: "success",
-    oilPriceCad: priceCad.toFixed(2),
-    yuanPriceCad: priceYuanRouteCad.toFixed(2),
-    priceSpreadCad:
-      (priceCad - priceYuanRouteCad).toFixed(2),
-    gasShockCad: estimatedGasShock.toFixed(2),
-    lastUpdated: Date.now()
-  };
-
-  await fs.writeFile(
-    cachePath,
-    JSON.stringify(freshData)
-  );
-
-  return freshData;
 }
 
-/* Route: Checks cache validity against
-   a 2-hour TTL to respect API limits.
-   Serves stale cache as a fallback if
-   the external API request fails. */
+/* Route: Manages the 2-hour cache. 
+   Gracefully handles missing files 
+   on spin-up without error spam. */
 app.get('/api/impactData', async (req, res) => {
   try {
     let marketData;
@@ -119,12 +122,12 @@ app.get('/api/impactData', async (req, res) => {
         isCacheValid = true;
       }
     } catch (err) {
-      console.log("No cache found on disk.");
+      // Quietly continue to fetch if no cache exists
     }
 
     if (!isCacheValid) {
       try {
-        console.log("Refreshing market data...");
+        console.log("Fetching fresh crude data...");
         marketData = await refreshMarketData();
       } catch (fetchError) {
         console.error("Fetch failed:", fetchError.message);
@@ -132,17 +135,16 @@ app.get('/api/impactData', async (req, res) => {
         if (!marketData) {
           return res.status(503).json({
             status: "error",
-            message: "Service Unavailable"
+            message: "API Down - No Cache"
           });
         }
-        console.log("Serving stale cache as fallback.");
       }
     }
 
     res.json(marketData);
 
   } catch (error) {
-    console.error("Critical System Error:", error.message);
+    console.error("System Error:", error.message);
     res.status(500).json({
       status: "error",
       message: "Logic failure"
@@ -159,3 +161,5 @@ app.get('*', (req, res) => {
 app.listen(portNumber, () => {
   console.log(`Engine Live: http://localhost:${portNumber}`);
 });
+
+// end of server.js refactor
